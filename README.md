@@ -104,3 +104,5 @@ python auto_battle.py
 ---
 
 **Enjoy Coding!** 🎉
+
+![Views](https://komarev.com/ghpvc/?username=lingyu369&repo=Baicizhan-Auto-Battle&label=Repository%20views&color=0e75b6&style=flat)
