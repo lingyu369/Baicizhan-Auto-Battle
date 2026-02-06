@@ -50,6 +50,9 @@ class OptimizedBot:
         self.last_word = ""
         self.last_action_time = 0
 
+        # === 新增：连续点击开始的计数器 ===
+        self.start_click_count = 0
+
     def load_dictionary(self):
         """加载通用大词典"""
         if not os.path.exists(DICT_FILENAME):
@@ -148,13 +151,10 @@ class OptimizedBot:
         """
         核心功能：扫描结算界面，学习正确答案
         """
-        # 为了OCR准确，这里重新转换一次原始图片，不使用带遮罩的processed_img
-        # 因为结算界面的列表可能在屏幕中偏下的位置
         img = cv2.cvtColor(np.asarray(img_pil), cv2.COLOR_RGB2BGR)
         h, w = img.shape[:2]
 
         # 裁剪出中间列表区域 (经验值：高度30%~80%，宽度10%~90%)
-        # 避开顶部的分数和底部的按钮
         roi = img[int(h * 0.3):int(h * 0.8), int(w * 0.1):int(w * 0.9)]
 
         # 对该区域进行OCR
@@ -167,18 +167,15 @@ class OptimizedBot:
         for line in result[0]:
             text = line[1][0]
             # 典型格式: "apple 苹果" 或 "apple n. 苹果"
-            # 寻找中文起始位置
             match = re.search(r'[\u4e00-\u9fa5]', text)
             if match:
                 split_idx = match.start()
                 en_part = text[:split_idx].strip()
                 cn_part = text[split_idx:].strip()
 
-                # 清洗英文部分 (去掉前面的对勾、叉号等干扰字符)
                 en_clean = re.sub(r'[^a-zA-Z\s\-\']', '', en_part).strip().lower()
 
                 if len(en_clean) > 1 and len(cn_part) > 0:
-                    # 如果不在偷题本里，或者解释更新，则保存
                     if en_clean not in self.cheat_sheet:
                         self.cheat_sheet[en_clean] = cn_part
                         learned_count += 1
@@ -188,24 +185,16 @@ class OptimizedBot:
             self.save_cheat_sheet()
 
     def calculate_similarity(self, meaning_str, option_text, is_exact_match_mode=False):
-        """
-        匹配算法
-        is_exact_match_mode: 如果是True，表示meaning_str来自偷题本，直接判断包含关系即可
-        """
+        """匹配算法"""
         opt_clean = re.sub(r'[^\w\u4e00-\u9fa5]', '', option_text)
         if not opt_clean: return 0.0
 
-        # === 模式1：偷题本模式 (暴力精准匹配) ===
         if is_exact_match_mode:
-            # 偷来的答案通常完全对应选项，直接看是否包含
-            # 去掉解释里的特殊符号
             mean_clean = re.sub(r'[^\w\u4e00-\u9fa5]', '', meaning_str)
             if opt_clean in mean_clean or mean_clean in opt_clean:
                 return 1.0
-            # 如果不包含，可能是OCR误差，降级到模糊匹配
             return SequenceMatcher(None, mean_clean, opt_clean).ratio()
 
-        # === 模式2：通用字典模式 (切词匹配) ===
         meaning_clean = re.sub(r'\b[a-z]+\.', '', meaning_str)
         keywords = re.split(r'[,，;；]', meaning_clean)
 
@@ -225,12 +214,11 @@ class OptimizedBot:
         return max_score
 
     def run(self):
-        print("🚀 V13.0 自进化版已启动！")
+        print("🚀 V13.1 自动冷却版已启动！")
 
         while True:
             try:
                 img_pil, w, h = self.capture_window()
-                # 答题时使用二值化图像提高准确率
                 processed_img = self.preprocess_image(img_pil)
 
                 result = ocr.ocr(processed_img, cls=False)
@@ -244,8 +232,9 @@ class OptimizedBot:
 
                 # --- 1. 状态判断：结算页面 ---
                 if "win" in all_text or "lose" in all_text or "返回" in all_text or "战绩" in all_text:
-                    # === 优化点1：先学习，后点击 ===
-                    # 传入原始彩色图片用于学习（避免遮罩挡住中间列表）
+                    # 成功进入结算，重置点击计数器
+                    self.start_click_count = 0
+
                     self.learn_from_result(img_pil)
 
                     print("🏆 结算操作：准备点击返回")
@@ -259,18 +248,27 @@ class OptimizedBot:
                     if not found:
                         self.click_relative(w * 0.25, h * 0.88)
 
-                    # 学习完且点击后，稍微多睡一会防止连点
                     time.sleep(2.0)
                     continue
 
                 # --- 2. 状态判断：开始/继续 ---
                 if "开始" in all_text or "再来" in all_text:
-                    print("🔘 点击开始")
+                    self.start_click_count += 1
+                    print(f"🔘 点击开始 (连续第 {self.start_click_count} 次)")
+
                     for line in res_data:
                         if "开始" in line[1][0] or "再来" in line[1][0]:
                             box = line[0]
                             self.click_relative((box[0][0] + box[2][0]) / 2, (box[0][1] + box[2][1]) / 2)
                             time.sleep(1.5)
+
+                    # === 检查是否需要休息 ===
+                    if self.start_click_count >= 4:
+                        print("⏳ 监测到连续4次点击开始，脚本将休息10分钟...")
+                        time.sleep(600)  # 600秒 = 10分钟
+                        self.start_click_count = 0  # 休息结束，重置计数器
+                        print("▶️ 休息结束，继续工作！")
+
                     continue
 
                 # --- 3. 答题逻辑 ---
@@ -298,51 +296,44 @@ class OptimizedBot:
                     continue
 
                 if en_word and len(options) >= 2:
-                    # 清洗单词
+                    # 成功识别到题目，说明游戏开始了，重置点击计数器
+                    self.start_click_count = 0
+
                     clean_word = re.sub(r'[^\w\s\-\']', '', en_word).strip().lower()
 
-                    # === 优化点2：优先查偷题本 ===
                     meaning = None
                     is_exact_mode = False
 
-                    # A. 查偷题本
                     if clean_word in self.cheat_sheet:
                         meaning = self.cheat_sheet[clean_word]
                         is_exact_mode = True
                         print(f"😈 [偷题本命中] {en_word} -> {meaning[:10]}...")
 
-                    # B. 查通用词典 (A未命中时)
                     if not meaning:
                         meaning = self.dictionary.get(clean_word)
                         if not meaning:
-                            # 尝试去空格容错
                             meaning = self.dictionary.get(clean_word.replace(" ", ""))
                         if meaning:
                             print(f"📖 [通用库查询] {en_word} -> {meaning[:10]}...")
 
-                    # C. 匹配选项
                     if meaning:
                         best_opt = None
                         max_score = 0.0
 
                         for opt in options:
-                            # 传入匹配模式参数
                             score = self.calculate_similarity(meaning, opt['text'], is_exact_match_mode=is_exact_mode)
 
                             if score > max_score:
                                 max_score = score
                                 best_opt = opt
 
-                        # 如果是偷题本来源，阈值可以低一点(因为内容是精准的)；如果是通用库，要求高一点
                         threshold = 0.3 if is_exact_mode else 0.5
 
                         if max_score > threshold:
                             print(f"⚡ 命中: {best_opt['text']} (分值:{max_score:.2f})")
                             self.click_relative(best_opt['x'], best_opt['y'])
                         else:
-                            print(f"   ⚠️ 分数过低({max_score:.2f})，根据相关性强行选一个最优的...")
-                            # 优化点2后半部分：若仍没有，选择意思最相关的(即当前分值最高的那个，即使很低)
-                            # 如果连0分都没有，那就只能蒙了
+                            print(f"   ⚠️ 分数过低({max_score:.2f})，强制选择最优...")
                             if best_opt and max_score > 0:
                                 print(f"   ⚡ 强行选择: {best_opt['text']}")
                                 self.click_relative(best_opt['x'], best_opt['y'])
@@ -355,7 +346,6 @@ class OptimizedBot:
                         target_opt = random.choice(options)
                         self.click_relative(target_opt['x'], target_opt['y'])
 
-                    # 记录操作防止连点
                     self.last_word = en_word
                     self.last_action_time = time.time()
                     time.sleep(0.3)
